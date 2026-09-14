@@ -1,0 +1,6 @@
+{
+  "name": "Sintaxis - Resúmenes Inteligentes",
+  "description": "Creador minimalista de resúmenes con IA estilo Apple. Analiza documentos, archivos y textos con especificaciones a medida, modo oscuro para lectura prolongada y soporte PWA móvil.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
