@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
+import mammoth from 'mammoth';
 
 dotenv.config();
 
@@ -20,7 +21,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Candidate models for basic text & summarization tasks in fallback order
 const CANDIDATE_MODELS = [
   'gemini-3.8-flash',
-  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite',
   'gemini-flash-latest',
 ];
 
@@ -68,6 +69,14 @@ function formatGeminiErrorMessage(error: any): string {
     const jsonStart = rawMsg.indexOf('{');
     if (jsonStart !== -1) {
       const parsed = JSON.parse(rawMsg.slice(jsonStart));
+      if (
+        parsed?.error?.code === 401 ||
+        parsed?.error?.status === 'UNAUTHENTICATED' ||
+        parsed?.error?.message?.includes('authentication credentials') ||
+        parsed?.error?.message?.includes('API_KEY_INVALID')
+      ) {
+        return 'La clave API de Gemini no es válida o fue eliminada (Error 401). Debes actualizar tu API Key en la sección Settings > Secrets de Google AI Studio.';
+      }
       if (parsed?.error?.code === 503 || parsed?.error?.status === 'UNAVAILABLE' || rawMsg.includes('high demand')) {
         return 'Los modelos de IA están experimentando una alta demanda temporal. Por favor, reintenta en unos instantes.';
       }
@@ -82,6 +91,15 @@ function formatGeminiErrorMessage(error: any): string {
     // Continue with text checks
   }
 
+  if (
+    rawMsg.includes('401') ||
+    rawMsg.includes('UNAUTHENTICATED') ||
+    rawMsg.includes('API_KEY_INVALID') ||
+    rawMsg.includes('authentication credentials') ||
+    rawMsg.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED')
+  ) {
+    return 'La clave API de Gemini no es válida o fue eliminada (Error 401). Debes actualizar tu API Key en la sección Settings > Secrets de Google AI Studio.';
+  }
   if (rawMsg.includes('503') || rawMsg.includes('UNAVAILABLE') || rawMsg.includes('high demand')) {
     return 'Los modelos de IA están experimentando una alta demanda temporal. Por favor, reintenta en unos instantes.';
   }
@@ -197,33 +215,136 @@ ${customInstructions ? `- INSTRUCCIONES ESPECÍFICAS DEL USUARIO (Prioridad Alta
 
 Asegúrate de NO incluir texto fuera del bloque JSON.`;
 
-    // Prepare contents array for Gemini
+    // Process uploaded files with support for Word (.docx), Text, Markdown, CSV, Code, PDFs, and Images
     const contents: any[] = [];
+    const extractedFileTexts: string[] = [];
+    let extractedWordsCount = 0;
 
-    // Add files if present (multimodal: PDFs, Images, Audio, Text files)
     if (Array.isArray(files) && files.length > 0) {
       for (const file of files) {
-        if (file.data && file.mimeType) {
-          // Clean base64 data if it includes data URL prefix
-          const base64Clean = file.data.includes('base64,') 
-            ? file.data.split('base64,')[1] 
-            : file.data;
+        if (!file.data) continue;
 
+        const base64Clean = file.data.includes('base64,') 
+          ? file.data.split('base64,')[1] 
+          : file.data;
+
+        const fileName = file.name || 'archivo_adjunto';
+        const ext = (fileName.split('.').pop() || '').toLowerCase();
+        const rawMime = (file.mimeType || '').toLowerCase();
+
+        // 1. Word Documents (.docx)
+        if (ext === 'docx' || rawMime.includes('wordprocessingml')) {
+          try {
+            const buffer = Buffer.from(base64Clean, 'base64');
+            const docResult = await mammoth.extractRawText({ buffer });
+            const docText = (docResult.value || '').trim();
+            if (docText) {
+              extractedFileTexts.push(`--- Documento Word (${fileName}) ---\n${docText}\n--- Fin de ${fileName} ---`);
+              extractedWordsCount += docText.split(/\s+/).filter(Boolean).length;
+            }
+          } catch (docErr) {
+            console.warn(`[DOCX Parse Warning] No se pudo extraer texto de ${fileName}:`, docErr);
+          }
+          continue;
+        }
+
+        // 2. Plain Text, Markdown, Code, CSV, JSON, XML, HTML files
+        const isTextExtension = [
+          'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'xml', 'html', 'htm',
+          'css', 'js', 'jsx', 'ts', 'tsx', 'py', 'java', 'c', 'cpp', 'h', 'cs',
+          'php', 'rb', 'go', 'rs', 'swift', 'kt', 'sh', 'yaml', 'yml', 'ini',
+          'sql', 'log', 'rtf'
+        ].includes(ext);
+
+        const isTextMime = rawMime.startsWith('text/') ||
+          rawMime === 'application/json' ||
+          rawMime === 'application/xml' ||
+          rawMime === 'application/javascript' ||
+          rawMime === 'application/x-yaml';
+
+        if (isTextExtension || isTextMime) {
+          try {
+            const decoded = Buffer.from(base64Clean, 'base64').toString('utf-8');
+            if (decoded) {
+              extractedFileTexts.push(`--- Archivo de Texto (${fileName}) ---\n${decoded}\n--- Fin de ${fileName} ---`);
+              extractedWordsCount += decoded.split(/\s+/).filter(Boolean).length;
+            }
+          } catch (txtErr) {
+            console.warn(`[Text Parse Warning] Error decodificando ${fileName}:`, txtErr);
+          }
+          continue;
+        }
+
+        // 3. PDF Documents (Native Gemini multimodal PDF support)
+        if (ext === 'pdf' || rawMime === 'application/pdf') {
           contents.push({
             inlineData: {
-              mimeType: file.mimeType,
+              mimeType: 'application/pdf',
               data: base64Clean,
             },
           });
+          continue;
+        }
+
+        // 4. Images (Native Gemini image support)
+        if (['png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'].includes(ext) || rawMime.startsWith('image/')) {
+          let imageMime = 'image/png';
+          if (ext === 'jpg' || ext === 'jpeg' || rawMime.includes('jpeg')) imageMime = 'image/jpeg';
+          else if (ext === 'webp' || rawMime.includes('webp')) imageMime = 'image/webp';
+          else if (ext === 'heic' || rawMime.includes('heic')) imageMime = 'image/heic';
+          else if (ext === 'heif' || rawMime.includes('heif')) imageMime = 'image/heif';
+
+          contents.push({
+            inlineData: {
+              mimeType: imageMime,
+              data: base64Clean,
+            },
+          });
+          continue;
+        }
+
+        // 5. Audio (Native Gemini audio support)
+        if (['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'].includes(ext) || rawMime.startsWith('audio/')) {
+          let audioMime = 'audio/mp3';
+          if (ext === 'wav' || rawMime.includes('wav')) audioMime = 'audio/wav';
+          else if (ext === 'aac' || rawMime.includes('aac')) audioMime = 'audio/aac';
+          else if (ext === 'm4a' || rawMime.includes('m4a')) audioMime = 'audio/m4a';
+          else if (ext === 'ogg' || rawMime.includes('ogg')) audioMime = 'audio/ogg';
+          else if (ext === 'flac' || rawMime.includes('flac')) audioMime = 'audio/flac';
+
+          contents.push({
+            inlineData: {
+              mimeType: audioMime,
+              data: base64Clean,
+            },
+          });
+          continue;
+        }
+
+        // 6. Generic Fallback: try decoding UTF-8 text
+        try {
+          const rawBuffer = Buffer.from(base64Clean, 'base64');
+          const utf8Test = rawBuffer.toString('utf-8');
+          const nonPrintable = (utf8Test.match(/[\x00-\x08\x0E-\x1F]/g) || []).length;
+          if (nonPrintable < utf8Test.length * 0.05 && utf8Test.trim().length > 0) {
+            extractedFileTexts.push(`--- Archivo (${fileName}) ---\n${utf8Test}\n--- Fin de ${fileName} ---`);
+            extractedWordsCount += utf8Test.split(/\s+/).filter(Boolean).length;
+          }
+        } catch {
+          // Skip if binary
         }
       }
     }
 
-    // Add main user text prompt
-    let userPromptText = 'Por favor analiza el contenido adjunto y genera el resumen estructurado siguiendo las especificaciones.';
-    if (text && text.trim()) {
-      userPromptText = `Texto a analizar y resumir:\n"""\n${text}\n"""\n\nGenera el resumen estructurado según las especificaciones requeridas.`;
+    // Build structured prompt with extracted files and user text
+    let userPromptText = '';
+    if (extractedFileTexts.length > 0) {
+      userPromptText += `CONTENIDO EXTRAÍDO DE LOS ARCHIVOS ADJUNTOS:\n\n${extractedFileTexts.join('\n\n')}\n\n`;
     }
+    if (text && text.trim()) {
+      userPromptText += `TEXTO / NOTAS DEL USUARIO:\n"""\n${text.trim()}\n"""\n\n`;
+    }
+    userPromptText += 'Genera el resumen estructurado en formato JSON siguiendo rigurosamente las instrucciones.';
 
     contents.push({
       text: userPromptText,
@@ -261,8 +382,10 @@ Asegúrate de NO incluir texto fuera del bloque JSON.`;
     }
 
     // Calculate word counts and metadata
+    const userWords = (text || '').split(/\s+/).filter(Boolean).length;
+    const totalOriginalWords = userWords + extractedWordsCount;
     const summaryWords = (parsedResult.summary || '').split(/\s+/).filter(Boolean).length;
-    const originalWords = (text || '').split(/\s+/).filter(Boolean).length || summaryWords * 3;
+    const originalWords = totalOriginalWords || summaryWords * 3;
     const reductionPercent = Math.max(10, Math.min(95, Math.round((1 - summaryWords / (originalWords || 1)) * 100)));
 
     res.json({

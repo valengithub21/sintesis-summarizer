@@ -55,18 +55,45 @@ export const SummaryInput: React.FC<SummaryInputProps> = ({ onGenerate, isLoadin
     }
   };
 
+  // Infer MIME type if browser leaves it empty
+  const inferMimeType = (file: File): string => {
+    if (file.type && file.type !== 'application/octet-stream') {
+      return file.type;
+    }
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const mimeMap: Record<string, string> = {
+      pdf: 'application/pdf',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      doc: 'application/msword',
+      txt: 'text/plain',
+      md: 'text/markdown',
+      markdown: 'text/markdown',
+      csv: 'text/csv',
+      tsv: 'text/tab-separated-values',
+      json: 'application/json',
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      webp: 'image/webp',
+      mp3: 'audio/mp3',
+      wav: 'audio/wav',
+    };
+    return mimeMap[ext] || file.type || 'application/octet-stream';
+  };
+
   const processFiles = (newFiles: File[]) => {
     newFiles.forEach((file) => {
       const reader = new FileReader();
       reader.onload = () => {
         const base64Data = reader.result as string;
+        const resolvedMime = inferMimeType(file);
         const newUploadedFile: UploadedFile = {
           id: 'file_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
           name: file.name,
           size: file.size,
-          mimeType: file.type || 'application/octet-stream',
+          mimeType: resolvedMime,
           data: base64Data,
-          previewUrl: file.type.startsWith('image/') ? base64Data : undefined,
+          previewUrl: resolvedMime.startsWith('image/') ? base64Data : undefined,
         };
 
         setFiles((prev) => [...prev, newUploadedFile]);
@@ -167,7 +194,9 @@ export const SummaryInput: React.FC<SummaryInputProps> = ({ onGenerate, isLoadin
     const ext = name.split('.').pop()?.toUpperCase() || 'FILE';
     if (ext === 'PDF') return <span className="w-8 h-9 bg-red-50 dark:bg-red-950/60 rounded-lg border border-red-200 dark:border-red-800 text-[10px] font-bold text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">PDF</span>;
     if (ext === 'DOC' || ext === 'DOCX') return <span className="w-8 h-9 bg-blue-50 dark:bg-blue-950/60 rounded-lg border border-blue-200 dark:border-blue-800 text-[10px] font-bold text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">DOC</span>;
+    if (['TXT', 'MD', 'CSV', 'JSON', 'XML'].includes(ext)) return <span className="w-8 h-9 bg-purple-50 dark:bg-purple-950/60 rounded-lg border border-purple-200 dark:border-purple-800 text-[10px] font-bold text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0">{ext.slice(0, 3)}</span>;
     if (mime.startsWith('image/')) return <span className="w-8 h-9 bg-emerald-50 dark:bg-emerald-950/60 rounded-lg border border-emerald-200 dark:border-emerald-800 text-[10px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">IMG</span>;
+    if (mime.startsWith('audio/') || ['MP3', 'WAV', 'M4A'].includes(ext)) return <span className="w-8 h-9 bg-amber-50 dark:bg-amber-950/60 rounded-lg border border-amber-200 dark:border-amber-800 text-[10px] font-bold text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">AUD</span>;
     return <span className="w-8 h-9 bg-gray-100 dark:bg-neutral-800 rounded-lg border border-[#D2D2D7] dark:border-[#38383A] text-[10px] font-bold text-[#86868B] flex items-center justify-center shrink-0">{ext.slice(0, 3)}</span>;
   };
 
